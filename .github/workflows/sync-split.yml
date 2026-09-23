@@ -1,0 +1,93 @@
+name: Sync upstream and split marketplace
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "23 */6 * * *"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-split-marketplace
+  cancel-in-progress: false
+
+env:
+  UPSTREAM_REPO: anthropics/claude-plugins-community
+  SHARD_COUNT: "3"
+  MAX_PLUGINS_PER_SHARD: "1900"
+
+jobs:
+  sync-and-split:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out automation branch
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Fetch latest upstream
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git remote remove upstream 2>/dev/null || true
+          git remote add upstream "https://github.com/${UPSTREAM_REPO}.git"
+
+          git fetch --prune upstream main
+          git fetch --prune origin "+refs/heads/*:refs/remotes/origin/*"
+
+          cp ".github/scripts/split_marketplace.py" "${RUNNER_TEMP}/split_marketplace.py"
+
+          upstream_sha="$(git rev-parse refs/remotes/upstream/main)"
+          echo "UPSTREAM_SHA=${upstream_sha}" >> "${GITHUB_ENV}"
+          echo "Upstream: ${upstream_sha}"
+
+      - name: Update exact upstream mirror branch
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          current_sha="$(git rev-parse refs/remotes/origin/upstream-mirror 2>/dev/null || true)"
+          if [[ "${current_sha}" == "${UPSTREAM_SHA}" ]]; then
+            echo "upstream-mirror is already current."
+          else
+            git push --force origin               "refs/remotes/upstream/main:refs/heads/upstream-mirror"
+          fi
+
+      - name: Generate and publish marketplace shards
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          short_sha="${UPSTREAM_SHA:0:12}"
+
+          for i in $(seq 1 "${SHARD_COUNT}"); do
+            branch="marketplace-${i}"
+
+            git checkout -f -B "${branch}" refs/remotes/upstream/main
+
+            python "${RUNNER_TEMP}/split_marketplace.py"               --file ".claude-plugin/marketplace.json"               --shard "${i}"               --shards "${SHARD_COUNT}"               --max-plugins "${MAX_PLUGINS_PER_SHARD}"
+
+            git add ".claude-plugin/marketplace.json"
+
+            desired_tree="$(git write-tree)"
+            current_tree="$(
+              git rev-parse "refs/remotes/origin/${branch}^{tree}" 2>/dev/null || true
+            )"
+
+            if [[ "${desired_tree}" == "${current_tree}" ]]; then
+              echo "${branch} already matches upstream ${short_sha}; skipping push."
+              git reset --hard
+              continue
+            fi
+
+            git commit -m "chore: generate ${branch} from upstream ${short_sha}"
+            git push --force origin "HEAD:refs/heads/${branch}"
+          done

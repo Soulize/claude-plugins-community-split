@@ -61,11 +61,9 @@ def main() -> None:
             f"max allowed per shard is {args.max_plugins}"
         )
 
-    original_name = data.get("name")
-    if not isinstance(original_name, str) or not original_name:
-        original_name = "claude-plugins-community"
-
-    data["name"] = f"{original_name}-split-{args.shard}"
+    # Use a clearly distinct marketplace name. Recent Claude Code versions reject
+    # third-party marketplaces whose names imitate reserved Anthropic marketplace names.
+    data["name"] = f"soulize-community-split-{args.shard}"
 
     description = data.get("description")
     suffix = (
